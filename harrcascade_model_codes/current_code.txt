@@ -1,0 +1,117 @@
+import cv2
+import pytesseract
+import re
+import os
+from datetime import datetime
+
+# Initialize Tesseract OCR
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+def sanitize_directory_name(name):
+    # Replace characters not suitable for directory names with underscores
+    invalid_chars = '\\/:*?"<>|}{'
+    for char in invalid_chars:
+        name = name.replace(char, '_')
+    # Remove leading and trailing whitespaces
+    name = name.strip()
+    # Replace any remaining whitespace with underscores
+    name = '_'.join(name.split())
+    return name
+
+def is_indian_license_plate(plate_text):
+    # Define a regular expression pattern to match Indian license plate format with some flexibility
+    pattern = r'^[A-Z0-9\s]{1,3}\s?\d{1,2}\s?[A-Z0-9\s]{1,4}\s?\d{3,4}$'
+    # Check if the plate text matches the pattern
+    return re.match(pattern, plate_text)
+
+def detect_and_save_plates(image, plate_cascade, confidence_threshold=50):
+    img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    cv2.imshow('Convert_to_Grey_scale_image',img_gray)
+    img_gray = cv2.bilateralFilter(img_gray, 15, 17, 17)
+    cv2.imshow('Bilateral_filter_Image',img_gray)
+
+    plates = plate_cascade.detectMultiScale(img_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+    detected_plates = []
+    for (x, y, w, h) in plates:
+        plate_roi = img_gray[y:y + h, x:x + w]
+
+        # Apply additional preprocessing to enhance plate clarity
+        plate_roi = cv2.threshold(plate_roi, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+        plate_roi = cv2.medianBlur(plate_roi, 3)
+        cv2.imshow('Additional_filters',plate_roi)
+
+        plate_text = pytesseract.image_to_string(plate_roi).strip()
+        plate_data = pytesseract.image_to_data(plate_roi, output_type=pytesseract.Output.DICT)
+        plate_confidences = [int(conf) if str(conf).isdigit() else int(conf) for conf in plate_data['conf']]
+        plate_confidence = max(plate_confidences) if plate_confidences else 0
+
+        if len(plate_text) > 0 and plate_confidence > confidence_threshold and is_indian_license_plate(plate_text):
+            # Draw rectangle around the plate
+            cv2.rectangle(image, (x, y), (x + w, y + h), (255, 0, 0), 2)
+            detected_plates.append(((x, y, w, h), plate_text, plate_confidence))
+
+    return detected_plates
+
+def save_plate_data(plate_data, image,img_grey,plate_roi):
+    for (x, y, w, h), plate_text, plate_confidence in plate_data:
+        # Sanitize directory name
+        sanitized_plate_text = sanitize_directory_name(plate_text)
+
+        # Create directory with the sanitized number plate as name if not already present
+        plate_dir = f"plates/{sanitized_plate_text}"
+        if not os.path.exists(plate_dir):
+            os.makedirs(plate_dir)
+
+            # Save the car image
+            cv2.imwrite(f"{plate_dir}/car_image.jpg", image)
+
+            # Save the plate image
+            plate_image = image[y:y + h, x:x + w]
+            cv2.imwrite(f"{plate_dir}/plate_image.jpg", plate_image)
+            cv2.imwrite(f"{plate_dir}/grey_image.jpg", img_grey)
+            cv2.imwrite(f"{plate_dir}/plate_roi.jpg", plate_roi)
+
+            # Save the plate text to a text file along with date and time
+            now = datetime.now()
+            current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+            with open(f"{plate_dir}/plate_text.txt", "w") as f:
+                f.write("-----------------------------------\n")
+                f.write(f"License plate number: {plate_text}\n")
+                f.write("-----------------------------------\n")
+                f.write(f"Confidence Level: {plate_confidence}\n")
+                f.write(f"Date and Time: {current_time}")
+
+            print(f"Car image, plate image, and plate text for {plate_text} saved successfully in directory: {plate_dir}.")
+        else:
+            print(f"Directory for {plate_text} already exists. Skipping saving.")
+
+def main():
+    data = "NPD_model/indian_license_plate.xml"
+    plate_cascade = cv2.CascadeClassifier(data)
+
+    cap = cv2.VideoCapture(0)
+    cap.set(3, 640)
+    cap.set(4, 480)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to capture frame.")
+            break
+
+        plate_data = detect_and_save_plates(frame, plate_cascade)
+
+        if plate_data:
+            save_plate_data(plate_data, frame)
+
+        cv2.imshow("Result", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()

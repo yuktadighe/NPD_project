@@ -1,0 +1,109 @@
+import cv2
+import pytesseract
+import os
+from datetime import datetime
+
+
+def sanitize_directory_name(name):
+    # Replace characters not suitable for directory names with underscores
+    invalid_chars = '\\/:*?"<>|'
+    for char in invalid_chars:
+        name = name.replace(char, '_')
+    # Remove leading and trailing whitespaces
+    name = name.strip()
+    # Replace any remaining whitespace with underscores
+    name = '_'.join(name.split())
+    return name
+
+
+def detect_and_save_plate(image, plate_cascade, min_area, count, confidence_threshold=65):
+    img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    img_gray = cv2.bilateralFilter(img_gray, 15, 17, 17)
+
+    plates = plate_cascade.detectMultiScale(img_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+    for (x, y, w, h) in plates:
+        plate_roi = img_gray[y:y + h, x:x + w]
+
+        # Apply additional preprocessing to enhance plate clarity
+        plate_roi = cv2.threshold(plate_roi, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+        plate_roi = cv2.medianBlur(plate_roi, 3)
+
+        plate_text = pytesseract.image_to_string(plate_roi).strip()
+        plate_data = pytesseract.image_to_data(plate_roi, output_type=pytesseract.Output.DICT)
+        plate_confidences = [int(conf) if str(conf).isdigit() else int(conf) for conf in plate_data['conf']]
+        plate_confidence = max(plate_confidences) if plate_confidences else 0
+
+        if len(plate_text) > 0 and plate_confidence > confidence_threshold:
+            # Draw rectangle around the plate
+            cv2.rectangle(image, (x, y), (x + w, y + h), (255, 0, 0), 2)
+
+            # Put text label on the rectangle
+            cv2.putText(image, "Number Plate: " + plate_text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+            # Sanitize directory name
+            sanitized_plate_text = sanitize_directory_name(plate_text)
+
+            # Create directory with the sanitized number plate as name if not already present
+            plate_dir = f"plates/{sanitized_plate_text}"
+            if not os.path.exists(plate_dir):
+                os.makedirs(plate_dir)
+
+                # Save the car image
+                cv2.imwrite(f"{plate_dir}/car_image.jpg", image)
+
+                # Save the plate image
+                plate_image = image[y:y + h, x:x + w]
+                cv2.imwrite(f"{plate_dir}/plate_image.jpg", plate_image)
+
+                # Save the plate text to a text file along with date and time
+                now = datetime.now()
+                current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+                with open(f"{plate_dir}/plate_text.txt", "w") as f:
+                    f.write("-----------------------------------\n")
+                    f.write(f"License plate number: {plate_text}\n")
+                    f.write("-----------------------------------\n")
+                    f.write(f"Confidence Level: {plate_confidence}\n")
+                    f.write(f"Date and Time: {current_time}")
+
+                print(f"Car image, plate image, and plate text for {plate_text} saved successfully.")
+
+                count += 1
+            else:
+                print(f"Directory for {plate_text} already exists. Skipping saving.")
+
+    return count
+
+
+def main():
+    data = "NPD_model/indian_license_plate.xml"
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+    cap = cv2.VideoCapture(0)
+    cap.set(3, 640)
+    cap.set(4, 480)
+    min_area = 500
+    count = 0
+
+    plate_cascade = cv2.CascadeClassifier(data)
+
+    while True:
+        success, image = cap.read()
+        if not success:
+            print("Failed to capture image.")
+            break
+
+        count = detect_and_save_plate(image, plate_cascade, min_area, count)
+
+        cv2.imshow("Result", image)
+
+        # Continue capturing images until manually stopped
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
