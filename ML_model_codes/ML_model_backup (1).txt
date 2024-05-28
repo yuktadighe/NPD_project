@@ -1,0 +1,147 @@
+import os
+import cv2
+import pandas as pd
+import pytesseract
+from datetime import datetime
+import numpy as np
+from ultralytics import YOLO
+
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
+model = YOLO('N_P_D_model.pt')
+
+# Define the sanitize_directory_name function
+def sanitize_directory_name(name):
+    invalid_chars = '\\/:*?"<>|{}'
+    for char in invalid_chars:
+        name = name.replace(char, '_')
+    name = name.strip()
+    name = '_'.join(name.split())
+    return name
+
+# Define the detect_and_save_plate function
+def detect_and_save_plate(image, plate_cascade, min_area, count, confidence_threshold=65):
+    img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    img_gray = cv2.bilateralFilter(img_gray, 15, 17, 17)
+
+    plates = plate_cascade.detectMultiScale(img_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+    for (x, y, w, h) in plates:
+        plate_roi = img_gray[y:y + h, x:x + w]
+
+        # Apply additional preprocessing to enhance plate clarity
+        plate_roi = cv2.threshold(plate_roi, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+        plate_roi = cv2.medianBlur(plate_roi, 3)
+
+        plate_text = pytesseract.image_to_string(plate_roi).strip()
+        plate_data = pytesseract.image_to_data(plate_roi, output_type=pytesseract.Output.DICT)
+        plate_confidences = [int(conf) if str(conf).isdigit() else int(conf) for conf in plate_data['conf']]
+        plate_confidence = max(plate_confidences) if plate_confidences else 0
+
+        if len(plate_text) > 0 and plate_confidence > confidence_threshold:
+            # Draw rectangle around the plate
+            cv2.rectangle(image, (x, y), (x + w, y + h), (255, 0, 0), 2)
+
+            # Put text label on the rectangle
+            cv2.putText(image, "Number Plate: " + plate_text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+            # Sanitize directory name
+            sanitized_plate_text = sanitize_directory_name(plate_text)
+
+            # Create directory with the sanitized number plate as name if not already present
+            plate_dir = f"plates/{sanitized_plate_text}"
+            if not os.path.exists(plate_dir):
+                os.makedirs(plate_dir)
+
+                # Save the car image
+                cv2.imwrite(f"{plate_dir}/car_image.jpg", image)
+
+                # Save the plate image
+                plate_image = image[y:y + h, x:x + w]
+                cv2.imwrite(f"{plate_dir}/plate_image.jpg", plate_image)
+
+                # Save the plate text to a text file along with date and time
+                now = datetime.now()
+                current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+                with open(f"{plate_dir}/plate_text.txt", "w") as f:
+                    f.write("-----------------------------------\n")
+                    f.write(f"License plate number: {plate_text}\n")
+                    f.write("-----------------------------------\n")
+                    f.write(f"Confidence Level: {plate_confidence}\n")
+                    f.write(f"Date and Time: {current_time}")
+
+                print(f"Car image, plate image, and plate text for {plate_text} saved successfully.")
+
+                count += 1
+            else:
+                print(f"Directory for {plate_text} already exists. Skipping saving.")
+
+    return count
+
+# Open file for writing car plate data
+with open("car_plate_data.txt", "a") as file:
+    file.write("NumberPlate\tDate\tTime\n")  # Writing column headers
+
+# Setup video capture
+cap = cv2.VideoCapture(0)
+
+count = 0
+processed_numbers = set()
+
+# Setup polygon area
+area = [(25, 25), (25, 480), (1000, 480), (1000, 25)]
+
+# List of classes used in the YOLO model
+class_list = [
+    "class1",
+    "class2",
+    # Add more classes as needed
+]
+
+# Main execution loop
+while True:
+    ret, frame = cap.read()
+    count += 1
+    if count % 3 != 0:
+        continue
+    if not ret:
+        break
+
+    frame = cv2.resize(frame, (1020, 500))
+    results = model.predict(frame)
+    a = results[0].boxes.data
+    px = pd.DataFrame(a).astype("float")
+
+    for index, row in px.iterrows():
+        x1 = int(row[0])
+        y1 = int(row[1])
+        x2 = int(row[2])
+        y2 = int(row[3])
+
+        d = int(row[5])
+        c = class_list[d]
+        cx = int(x1 + x2) // 2
+        cy = int(y1 + y2) // 2
+        result = cv2.pointPolygonTest(np.array(area, np.int32), ((cx, cy)), False)
+        if result >= 0:
+            crop = frame[y1:y2, x1:x2]
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            gray = cv2.bilateralFilter(gray, 10, 20, 20)
+
+            text = pytesseract.image_to_string(gray).strip()
+            text = text.replace('(', '').replace(')', '').replace(',', '').replace(']', '')
+            if text not in processed_numbers:
+                processed_numbers.add(text)
+                current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with open("car_plate_data.txt", "a") as file:
+                    file.write(f"{text}\t{current_datetime}\n")
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.imshow('crop', crop)
+
+    cv2.polylines(frame, [np.array(area, np.int32)], True, (255, 0, 0), 2)
+    cv2.imshow("RGB", frame)
+    if cv2.waitKey(1) & 0xFF == 27:
+        break
+
+cap.release()
+cv2.destroyAllWindows()
